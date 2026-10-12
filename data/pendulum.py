@@ -1,40 +1,46 @@
-import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
-np.random.seed(42)
+class NaiveNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 2)
+        )
 
-g, m, L = 10.0, 1.0, 1.0
-dt = 0.05
-max_speed = 8.0
-steps_per_traj = 50
+    def forward(self, t):
+        return self.net(t)
 
-def step_pendulum(theta, omega, u):
-    # Ta mise à jour exacte
-    new_omega = omega + ((3 * g) / (2 * L) * np.sin(theta) + (3 * u) / (m * L**2)) * dt
-    new_omega = np.clip(new_omega, -max_speed, max_speed)
+model = NaiveNN()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+criterion = nn.MSELoss()
+
+df = pd.read_csv('data/data_10000.csv')
+
+# Entrées (3 colonnes) et Sorties (2 colonnes)
+X = torch.tensor(df[['theta_t', 'omega_t', 'u_t']].values, dtype=torch.float32)
+Y = torch.tensor(df[['theta_next', 'omega_next']].values, dtype=torch.float32)
+
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+
+for epoch in range(100):
+    model.train()
+    optimizer.zero_grad()
     
-    new_theta = theta + new_omega * dt
-    # On garde l'angle entre -pi et pi pour éviter que la valeur n'explose
-    new_theta = (new_theta + np.pi) % (2 * np.pi) - np.pi
+    pred = model(X_train)
+    loss = criterion(pred, y_train)
     
-    return new_theta, new_omega
+    loss.backward()
+    optimizer.step()
+    
+    if (epoch + 1) % 10 == 0:
+        print(f'Epoch [{epoch + 1}/100], Loss: {loss.item():.4f}')
 
-for size in [100, 1000, 10000]:
-    data = []
-    traj_id = 0
-    while len(data) < size:
-        theta = np.random.uniform(-np.pi, np.pi)
-        omega = np.random.uniform(-max_speed, max_speed)
-        traj_id += 1
-        
-        for _ in range(steps_per_traj):
-            if len(data) >= size: break
-            
-            u = np.random.uniform(-2.0, 2.0)
-            next_theta, next_omega = step_pendulum(theta, omega, u)
-            
-            data.append([traj_id, theta, omega, u, next_theta, next_omega])
-            theta, omega = next_theta, next_omega
-            
-    df = pd.DataFrame(data, columns=['trajectory_id','theta_t', 'omega_t', 'u_t', 'theta_next', 'omega_next'])
-    df.to_csv(f'data_{size}.csv', index=False)
+torch.save(model.state_dict(), 'models/naiveNN_model.pth')
