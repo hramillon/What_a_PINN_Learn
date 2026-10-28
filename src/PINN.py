@@ -1,93 +1,175 @@
+import argparse
+import os
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import pandas as pd
-from sklearn.model_selection import train_test_split
+
+# ---------------------------------------------------------------- arguments
+p = argparse.ArgumentParser()
+p.add_argument('--n', type=int, default=100, help="taille du dataset (100, 1000, 10000)")
+p.add_argument('--lam', type=float, default=1.0, help="poids de la loss physique (0 = réseau purement supervisé)")
+p.add_argument('--ncol', type=int, default=2000, help="points de collocation tirés à chaque epoch")
+p.add_argument('--epochs', type=int, default=1000)
+args = p.parse_args()
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+# ------------------------------------------------- constantes (= générateur)
+G, M, L, DT = 10.0, 1.0, 1.0, 0.05
+WMAX, UMAX = 8.0, 2.0
+PI = torch.pi
 
 
+def wrap(x):
+    """Ramène un angle dans [-pi, pi)."""
+    return torch.remainder(x + PI, 2 * PI) - PI
+
+
+# ------------------------------------------------------------------ modèle
 class PINN(nn.Module):
+    """Entrée  : X = [theta_t, omega_t, u_t]  (theta brut, en radians)
+    Sortie : [dtheta/(WMAX*DT), omega_next/WMAX]  (valeurs normalisées ~[-1, 1])
+    theta n'est jamais donné brut au réseau : on donne sin/cos, donc plus de saut en +-pi.
+    """
+
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 2)
+            nn.Linear(4, 64), nn.Tanh(),
+            nn.Linear(64, 64), nn.Tanh(),
+            nn.Linear(64, 2),
         )
 
-    def forward(self, t):
-        return self.net(t)
+    def forward(self, X):
+        th, om, u = X[:, 0], X[:, 1], X[:, 2]
+        feat = torch.stack([torch.sin(th), torch.cos(th), om / WMAX, u / UMAX], dim=1)
+        return self.net(feat)
 
+
+def physics(X):
+    """Prédiction exacte de l'équation (mêmes formules que le générateur, clip inclus),
+    dans les mêmes unités normalisées que la sortie du réseau."""
+    th, om, u = X[:, 0], X[:, 1], X[:, 2]
+    om_n = om + ((3 * G) / (2 * L) * torch.sin(th) + (3 * u) / (M * L ** 2)) * DT
+    om_n = torch.clamp(om_n, -WMAX, WMAX)
+    dth = om_n * DT
+    return torch.stack([dth / (WMAX * DT), om_n / WMAX], dim=1)
+
+
+def target_from_data(X, Y):
+    """Convertit (theta_next, omega_next) du CSV en cibles normalisées.
+    wrap(theta_next - theta_t) supprime le saut de 2*pi dû à l'enroulement."""
+    dth = wrap(Y[:, 0] - X[:, 0])
+    return torch.stack([dth / (WMAX * DT), Y[:, 1] / WMAX], dim=1)
+
+
+def decode(out):
+    """Sortie normalisée -> (dtheta, omega_next) en unités physiques."""
+    return out[:, 0] * WMAX * DT, out[:, 1] * WMAX
+
+
+# ------------------------------------------------------------ données
+df = pd.read_csv(f'data/data_{args.n}.csv')
+
+# Split PAR TRAJECTOIRE (pas par ligne) pour éviter la fuite train/test
+ids = df['trajectory_id'].unique()
+ids = np.random.permutation(ids)
+n_test = max(1, int(0.2 * len(ids)))
+test_ids, train_ids = ids[:n_test], ids[n_test:]
+df_train = df[df['trajectory_id'].isin(train_ids)]
+df_test = df[df['trajectory_id'].isin(test_ids)]
+print(f"{len(train_ids)} trajectoires train ({len(df_train)} lignes), "
+      f"{len(test_ids)} trajectoires test ({len(df_test)} lignes)")
+
+cols_X = ['theta_t', 'omega_t', 'u_t']
+cols_Y = ['theta_next', 'omega_next']
+
+
+def to_tensors(d):
+    X = torch.tensor(d[cols_X].values, dtype=torch.float32)
+    Y = torch.tensor(d[cols_Y].values, dtype=torch.float32)
+    return X, target_from_data(X, Y)
+
+
+X_train, T_train = to_tensors(df_train)
+X_test, T_test = to_tensors(df_test)
+
+# ------------------------------------------------------------ entraînement
 model = PINN()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 mse = nn.MSELoss()
 
+best_val, best_state = float('inf'), None
 
-def physics_loss(X, Y_pred):
-    # X contient [theta_t, omega_t, u_t]
-    theta, omega, u_control = X[:, 0], X[:, 1], X[:, 2]
-    
-    # Y_pred contient les prédictions [theta_next, omega_next]
-    theta_next_pred, omega_next_pred = Y_pred[:, 0], Y_pred[:, 1]
-    
-    g, m, L, dt = 10.0, 1.0, 1.0, 0.05
-    
-    # Calcul de l'état suivant selon la physique (sans np.clip/modulo pour rester différentiable)
-    omega_next_phys = omega + ((3 * g) / (2 * L) * torch.sin(theta) + (3 * u_control) / (m * L**2)) * dt
-    theta_next_phys = theta + omega_next_phys * dt
-    
-    # Résidu f : écart entre la prédiction du réseau et la loi physique
-    f_theta = theta_next_pred - theta_next_phys
-    f_omega = omega_next_pred - omega_next_phys
-    
-    return torch.mean(f_theta**2 + f_omega**2)
-
-
-df = pd.read_csv('data/data_10000.csv')
-
-# Entrées (3 colonnes) et Sorties (2 colonnes)
-X = torch.tensor(df[['theta_t', 'omega_t', 'u_t']].values, dtype=torch.float32)
-Y = torch.tensor(df[['theta_next', 'omega_next']].values, dtype=torch.float32)
-
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-
-for epoch in range(10000):
+for epoch in range(args.epochs):
     model.train()
     optimizer.zero_grad()
-    
-    pred = model(X_train)
-    mse_u = mse(pred, y_train)          
-    mse_f = physics_loss(X_train, pred)
 
-    loss = mse_u + mse_f
-    
+    # 1) perte de données : prédiction vs. données du CSV
+    loss_data = mse(model(X_train), T_train)
+
+    # 2) perte physique : points de collocation tirés au hasard, SANS labels.
+    #    Le réseau doit satisfaire l'équation partout dans l'espace des états.
+    Xc = torch.empty(args.ncol, 3)
+    Xc[:, 0].uniform_(-np.pi, np.pi)
+    Xc[:, 1].uniform_(-WMAX, WMAX)
+    Xc[:, 2].uniform_(-UMAX, UMAX)
+    loss_phys = mse(model(Xc), physics(Xc))
+
+    loss = loss_data + args.lam * loss_phys
     loss.backward()
     optimizer.step()
-    
-    if (epoch + 1) % 10 == 0:
-        print(f'Epoch [{epoch + 1}/10000], Loss: {loss.item():.4f}')
 
-# Evaluation du modèle
+    # validation (perte de données uniquement) + sauvegarde du meilleur modèle
+    model.eval()
+    with torch.no_grad():
+        val = mse(model(X_test), T_test).item()
+    if val < best_val:
+        best_val = val
+        best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
+    if (epoch + 1) % 500 == 0:
+        print(f"Epoch {epoch + 1}/{args.epochs}  data={loss_data.item():.2e}  "
+              f"phys={loss_phys.item():.2e}  val={val:.2e}")
+
+model.load_state_dict(best_state)
 model.eval()
-with torch.no_grad():
-    test_pred = model(X_test)
+print(f"Meilleure val loss : {best_val:.2e}")
 
-    mse_test_u = mse(test_pred, y_test)          
-    mse_test_f = physics_loss(X_test, test_pred)
-    
-    test_loss = mse_test_f + mse_test_u
-    print(f'Test Loss: {test_loss.item():.4f}')
+# ------------------------------------------------ évaluation en rollout
+# Le réseau est rejoué seul, pas à pas, avec la vraie séquence de u.
+# On compare à la trajectoire du CSV : c'est le test qui reflète l'aspect visuel.
+def rollout_errors(d):
+    err_th, err_om = [], []
+    for _, g in d.groupby('trajectory_id', sort=False):
+        th = torch.tensor(g['theta_t'].iloc[0], dtype=torch.float32)
+        om = torch.tensor(g['omega_t'].iloc[0], dtype=torch.float32)
+        th_true = torch.tensor(g['theta_next'].values, dtype=torch.float32)
+        om_true = torch.tensor(g['omega_next'].values, dtype=torch.float32)
+        us = torch.tensor(g['u_t'].values, dtype=torch.float32)
+        e_th, e_om = [], []
+        with torch.no_grad():
+            for k in range(len(g)):
+                x = torch.stack([th, om, us[k]]).unsqueeze(0)
+                dth, om_n = decode(model(x))
+                th = wrap(th + dth[0])
+                om = om_n[0]
+                e_th.append(wrap(th - th_true[k]).abs().item())
+                e_om.append((om - om_true[k]).abs().item())
+        err_th.append(e_th)
+        err_om.append(e_om)
+    return err_th, err_om
 
-torch.save(model.state_dict(), 'models/PINN_model.pth')
 
-## model 100 points 1000 epochs
-#Epoch [1000/1000], Loss: 0.7772
-#Test Loss: 0.9252
-# Leger overfitting
+err_th, err_om = rollout_errors(df_test)
+for k in (1, 10, 25, 50):
+    ok_th = [e[k - 1] for e in err_th if len(e) >= k]
+    ok_om = [e[k - 1] for e in err_om if len(e) >= k]
+    if ok_th:
+        print(f"Rollout pas {k:2d} : erreur |theta| = {np.mean(ok_th):.3f} rad, "
+              f"erreur |omega| = {np.mean(ok_om):.3f} rad/s  ({len(ok_th)} traj.)")
 
-## model 1000 points 
-#Epoch [10000/10000], Loss: 0.5618
-#Test Loss: 0.6508
-# Leger overfitting + mouvements hasardeux mais plus variès que avec 100 points
+os.makedirs('models', exist_ok=True)
+torch.save(best_state, f'models/PINN_model_n{args.n}_lam{args.lam}.pth')

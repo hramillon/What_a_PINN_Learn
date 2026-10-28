@@ -34,7 +34,7 @@ class PINN(nn.Module):
 
 # 1. Chargement du modèle
 model = PINN()
-model.load_state_dict(torch.load('models/PINN_1000_model.pth'))
+model.load_state_dict(torch.load('models/PINN_10000_model.pth'))
 model.eval()
 
 # 2. Paramètres initiaux
