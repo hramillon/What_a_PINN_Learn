@@ -18,6 +18,20 @@ class NaiveNN(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class PINN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 2)
+        )
+
+    def forward(self, t):
+        return self.net(t)
+
 # 1. Chargement du modèle
 model = NaiveNN()
 model.load_state_dict(torch.load('models/naiveNN_model.pth'))
@@ -62,13 +76,13 @@ def animate(i):
     # Les équations d'origine du pendule inversé font que l'angle 0 est en haut.
     # Pour qu'il pende normalement, on utilise -cos pour l'axe Y.
     x = np.sin(trajectoire[i])
-    y = -np.cos(trajectoire[i])
+    y = np.cos(trajectoire[i])
     line.set_data([0, x], [0, y])
     
     # Traînée historique (jusqu'aux 20 frames précédentes)
     start = max(0, i - 20)
     xs = np.sin(trajectoire[start:i+1])
-    ys = -np.cos(trajectoire[start:i+1])
+    ys = np.cos(trajectoire[start:i+1])
     trail.set_data(xs, ys)
     
     return line, trail

@@ -30,7 +30,7 @@ Y = torch.tensor(df[['theta_next', 'omega_next']].values, dtype=torch.float32)
 
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-for epoch in range(200):
+for epoch in range(4000):
     model.train()
     optimizer.zero_grad()
     
@@ -41,7 +41,7 @@ for epoch in range(200):
     optimizer.step()
     
     if (epoch + 1) % 10 == 0:
-        print(f'Epoch [{epoch + 1}/200], Loss: {loss.item():.4f}')
+        print(f'Epoch [{epoch + 1}/4000], Loss: {loss.item():.4f}')
 
 # Evaluation du modèle
 
