@@ -33,8 +33,8 @@ class PINN(nn.Module):
         return self.net(t)
 
 # 1. Chargement du modèle
-model = NaiveNN()
-model.load_state_dict(torch.load('models/naiveNN_model.pth'))
+model = PINN()
+model.load_state_dict(torch.load('models/PINN_1000_model.pth'))
 model.eval()
 
 # 2. Paramètres initiaux

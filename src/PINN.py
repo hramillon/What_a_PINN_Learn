@@ -44,7 +44,7 @@ def physics_loss(X, Y_pred):
     return torch.mean(f_theta**2 + f_omega**2)
 
 
-df = pd.read_csv('data/data_1000.csv')
+df = pd.read_csv('data/data_10000.csv')
 
 # Entrées (3 colonnes) et Sorties (2 colonnes)
 X = torch.tensor(df[['theta_t', 'omega_t', 'u_t']].values, dtype=torch.float32)
@@ -88,6 +88,6 @@ torch.save(model.state_dict(), 'models/PINN_model.pth')
 # Leger overfitting
 
 ## model 1000 points 
-#Epoch [1000/1000], Loss: 0.7772
-#Test Loss: 0.9252
-# Leger overfitting
+#Epoch [10000/10000], Loss: 0.5618
+#Test Loss: 0.6508
+# Leger overfitting + mouvements hasardeux mais plus variès que avec 100 points
